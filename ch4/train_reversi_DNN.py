@@ -16,7 +16,7 @@ SIZE = 4    # ボードサイズ SIZE*SIZE
 NONE = 0    # ボードのある座標にある石：なし
 BLACK = 1   # ボードのある座標にある石：黒
 WHITE = 2   # ボードのある座標にある石：しろ
-STONE = ['　', '●', '○']    # 石の表示用
+STONE = [' ', '●', '○']    # 石の表示用
 ROWLABEL = {chr(ord('a') + x): x + 1 for x in range(8)}  # ボードの横軸ラベル
 N2L = [''] + [chr(ord('a') + x) for x in range(8)]
 REWARD_WIN = 1      # 買った時の報酬
@@ -159,9 +159,39 @@ class Board():
             self.winner = BLACK if len(np.where(self.board == BLACK)[0]) > len(
                 np.where(self.board == WHITE)[0]) else WHITE
 
+    # ボード表示
+    def show_board(self):
+        print('  ', end='')
+        for i in range(1, SIZE + 1):
+            print(' {}'.format(N2L[i]), end='')  # 横軸ラベル表示
+        print('')
+        for i in range(0, SIZE):
+            print('{0:2d} '.format(i+1), end='')
+            for j in range(0, SIZE):
+                print('{} '.format(STONE[int(self.board[i][j])]), end='')
+            print('')
+
+# キーボードから入力した座標を２次元配列に対応するよう変換する
+
+
+def convert_coordinate(pos):
+    pos = pos.split(' ')
+    i = int(pos[0]) - 1
+    j = int(ROWLABEL[pos[1]]) - 1
+    return (i, j)   # タプルで返す。iが縦、jが横
+
+
+def judge(board, a, you):
+    if board.winner == a:
+        print('Game over. You lose!')
+    elif board.winner == you:
+        print('Game over You win!')
+    else:
+        print('Game over. Draw.')
+
 
 def main():
-    """ メイン関数 """
+    """ メイン関数(学習用) """
     board = Board()  # ボード初期化
 
     obs_size = SIZE * SIZE  # ボードサイズ（=NN入力次元数）
@@ -261,5 +291,102 @@ def main():
             agent_white.save('agent_white_' + str(i))
 
 
+def main_play():
+    """ メイン関数(プレイ用) """
+    board = Board()  # ボード初期化
+
+    obs_size = SIZE * SIZE  # ボードサイズ（=NN入力次元数）
+    n_actions = SIZE * SIZE  # 行動数はSIZE*SIZE(ボードのどこに石を置くか)
+    n_nodes = 256   # 中間層のノード数
+    q_func = QFunction(obs_size, n_actions, n_nodes)
+
+    # optimizerの設定
+    optimizer = chainer.optimizers.Adam(eps=1e-2)
+    optimizer.setup(q_func)
+    # 減衰率
+    gamma = 0.99
+    # ε-greedy法
+    explorer = chainerrl.explorers.LinearDecayEpsilonGreedy(
+        start_epsilon=1.0, end_epsilon=0.1, decay_steps=50000, random_action_func=board.random_action)
+    # Experience Replay用のバッファ（十分大きく、エージェントごとに用意）
+    replay_buffer = chainerrl.replay_buffers.ReplayBuffer(capacity=10 ** 6)
+    # エージェント。DQNを利用。バッチサイズを少し大きめに設定
+    agent = chainerrl.agents.DQN(q_func, optimizer, replay_buffer, gamma, explorer,
+                                 replay_start_size=1000, minibatch_size=128, update_interval=1, target_update_interval=1000)
+
+    ### ここからゲームスタート ###
+    print('=== リバーシ ===')
+    you = input('先行（黒石, 1） or 後攻（白石, 2）を選択：')
+    you = int(you)
+    trn = you
+    assert(you == BLACK or you == WHITE)
+    level = input('難易度（弱 1〜10 強）')
+    level = int(level) * 2000
+    if you == BLACK:
+        s = '「●」（先行）'
+        file = 'agent_white_' + str(level)
+        a = WHITE
+    else:
+        s = '「◯」（後攻）'
+        file = 'agent_black_' + str(level)
+        a = BLACK
+    agent.load(file)
+    print('あなたは{}です。ゲームスタート！'.format(s))
+    board.show_board()
+
+    # ゲーム開始
+    while not board.game_end:
+        if trn == 2:
+            boardcopy = np.reshape(board.board.copy(), (-1,))  # ボードを１次元に変換
+            pos = divmod(agent.act(boardcopy), SIZE)
+            # NNで置く場所が置けない場所であれば置ける場所からランダムに選択する
+            if not board.is_available(pos):
+                pos = board.random_action()
+                if not pos:  # 置く場所がなければパス
+                    board.pss += 1
+                else:
+                    pos = divmod(pos, SIZE)  # 座標を２次元に変換
+            print('エージェントのターン --> ', end='')
+            if board.pss > 0 and not pos:
+                print('パスします。{}'.format(board.pss))
+            else:
+                board.agent_action(pos)  # posに石を置く
+                board.pss = 0
+                print('({},{})'.format(pos[0]+1, N2L[pos[1]+1]))
+            board.show_board()
+            board.end_check()
+            if board.game_end:
+                judge(board, a, you)
+                continue
+            board.change_turn()  # エージェント　--> You
+
+        while True:
+            print('あなたのターン。')
+            if not board.search_positions():
+                print('パスします')
+                board.pss += 1
+            else:
+                pos = input('どこに石を置きますか？（行列で指定。例 "4 c"）：')
+                if not re.match(r'[0-9] [a-z]', pos):
+                    print('正しく座標を入力してください。')
+                    continue
+                else:
+                    if not board.is_available(convert_coordinate(pos)):  # 置けない場所に置いた場合
+                        print('ここには石を置けません。')
+                        continue
+                    board.agent_action(convert_coordinate(pos))
+                    board.show_board()
+                    board.pss = 0
+            break
+        board.end_check()
+        if board.game_end:
+            judge(board, a, you)
+            continue
+
+        trn = 2
+        board.change_turn()
+
+
 if __name__ == '__main__':
-    main()
+    # main()
+    main_play()
